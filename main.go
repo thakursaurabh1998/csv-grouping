@@ -124,52 +124,6 @@ func mapFunction(buf []byte) {
 	}
 }
 
-func csvReader(f *os.File) {
-	r := bufio.NewReader(f)
-
-	bufPool := sync.Pool{New: func() interface{} {
-		buf := make([]byte, chunkSize)
-		return buf
-	}}
-
-	var wg sync.WaitGroup
-
-	for {
-		buf := bufPool.Get().([]byte)
-		n, err := r.Read(buf)
-		buf = buf[:n]
-		if n == 0 {
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				log.Fatal("here", err)
-				break
-			}
-		}
-		completeLine, err := r.ReadBytes('\n')
-
-		if err != io.EOF {
-			buf = append(buf, completeLine...)
-		}
-
-		wg.Add(1)
-
-		// fmt.Printf(string(buf))
-
-		PrintMemUsage()
-
-		go func() {
-			// mapFunction(buf)
-			// data := mapFunction(buf)
-
-			defer wg.Done()
-		}()
-	}
-
-	wg.Wait()
-}
-
 func writeDataToFile(fileName, data string) {
 	f, err := os.Create("./meta.json")
 	check(err)
