@@ -9,10 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -25,9 +22,8 @@ const (
 type ChunkMeta struct {
 	Id         int    `json:"id"`
 	Processed  bool   `json:"processed"`
-	StartLine  int    `json:"startLine"`
-	EndLine    int    `json:"endLine"`
 	OutputFile string `json:"outputFile"`
+	InputFile  string `json:"inputFile"`
 }
 
 type CsvMeta struct {
@@ -50,122 +46,24 @@ func PrintMemUsage() {
 
 func check(e error) {
 	if e != nil {
+		log.Fatal(e)
 		panic(e)
 	}
 }
 
-func linesNum(fileName string) (uint64, error) {
-	out, err := exec.Command("wc", "-l", fileName).Output()
-
-	if runtime.GOOS == "windows" {
-		return 0, fmt.Errorf("Can't execute on windows")
-	}
-	if err != nil {
-		return 0, err
-	}
-
-	output := strings.Trim(string(out), " ")
-	countStr := strings.Split(output, " ")
-	count, err := strconv.ParseUint(countStr[0], 10, 64)
-
-	return count, err
-}
-
-// linesInChunk gives an estimate number of lines
-// present in a chunk of decided size
-func linesInChunk(f *os.File) uint64 {
-	r := bufio.NewReader(f)
-
-	buf := make([]byte, chunkSize)
-	n, err := r.Read(buf)
-
-	if n == 0 {
-		if err == io.EOF {
-			log.Fatal("empty file")
-		}
-		if err != nil {
-			log.Fatal("here", err)
-		}
-	} else {
-		completeLine, err := r.ReadBytes('\n')
-
-		if err != io.EOF {
-			buf = append(buf, completeLine...)
-		}
-	}
-
-	lines := string(buf)
-
-	newlines := uint64(strings.Count(lines, "\n"))
-
-	return newlines
-}
-
-func mapFunction(buf []byte) {
-	content := string(buf)
-
-	r := csv.NewReader(strings.NewReader(content))
-
-	dimensionMap := make(map[string]interface{})
-
-	for {
-		record, err := r.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			log.Fatal("here2", err)
-		}
-
-		key := record[0] + record[1] + record[2]
-		if dimensionMap[key] == nil {
-			dimensionMap[key] = 0
-		}
-	}
-}
-
-func writeDataToFile(fileName, data string) {
-	f, err := os.Create("./meta.json")
+func writeDataToFile(fileName string, bufData []byte, data string) {
+	f, err := os.Create(fileName)
 	check(err)
 
 	defer f.Close()
 
-	_, err = f.WriteString(data)
+	if bufData == nil {
+		_, err = f.WriteString(data)
+	} else {
+		_, err = f.Write(bufData)
+	}
 
 	check(err)
-}
-
-func createCsvMeta(fileName string, totalLines, chunkLineCount uint64) *CsvMeta {
-	var chunks []ChunkMeta
-
-	counter := 0
-
-	for i := 2; i < int(totalLines); i += int(chunkLineCount) + 1 {
-		startLine := i
-		endLine := i + int(chunkLineCount)
-		if endLine > int(totalLines) {
-			endLine = int(totalLines)
-		}
-		chunks = append(chunks, ChunkMeta{
-			Id:         counter,
-			Processed:  false,
-			StartLine:  startLine,
-			EndLine:    endLine,
-			OutputFile: fmt.Sprintf("map%d.json", counter),
-		})
-		counter += 1
-	}
-
-	meta := CsvMeta{
-		ChunkSize:  chunkSize,
-		ChunksMeta: chunks,
-	}
-
-	metaJson, _ := json.Marshal(meta)
-
-	writeDataToFile(fileName, string(metaJson))
-
-	return &meta
 }
 
 func getCsvMeta() *CsvMeta {
@@ -190,33 +88,31 @@ func isProcessingPending(meta *CsvMeta) bool {
 	return false
 }
 
-func withScanner(input io.ReadSeeker, start int64) error {
-	fmt.Println("--SCANNER, start:", start)
-	if _, err := input.Seek(start, 0); err != nil {
-		return err
-	}
-	scanner := bufio.NewScanner(input)
+func processCsvSegment(chunkMeta ChunkMeta) {
+	f, err := os.Open(chunkMeta.InputFile)
+	check(err)
+	defer f.Close()
+	r := csv.NewReader(f)
 
-	pos := start
-	scanLines := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		advance, token, err = bufio.ScanLines(data, atEOF)
-		pos += int64(advance)
-		return
-	}
-	scanner.Split(scanLines)
+	var header []string
 
-	for scanner.Scan() {
-		fmt.Printf("Pos: %d, Scanned: %s\n", pos, scanner.Text())
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+            break
+        }
+		if err != nil {
+            panic(err)
+        }
+		if len(header) == 0 {
+			header = record
+		}
+
+		// data processing here
 	}
-	return scanner.Err()
 }
 
-func processCsvSegment(f *os.File, chunkMeta ChunkMeta) {
-	fmt.Println(chunkMeta)
-
-}
-
-func startProcessing(f *os.File, meta *CsvMeta) {
+func startProcessing(fileName string, meta *CsvMeta) {
 	var wg sync.WaitGroup
 
 	for _, chunk := range meta.ChunksMeta {
@@ -224,7 +120,7 @@ func startProcessing(f *os.File, meta *CsvMeta) {
 			wg.Add(1)
 			go func(chunk ChunkMeta) {
 				defer wg.Done()
-				processCsvSegment(f, chunk)
+				processCsvSegment(chunk)
 			}(chunk)
 		}
 	}
@@ -232,9 +128,67 @@ func startProcessing(f *os.File, meta *CsvMeta) {
 	wg.Wait()
 }
 
+func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
+	var chunks []ChunkMeta
+
+	r := bufio.NewReader(inputFile)
+
+	bufPool := sync.Pool{New: func() interface{} {
+		buf := make([]byte, chunkSize)
+		return buf
+	}}
+
+	counter := 1
+
+	headerBuf, _, _ := r.ReadLine()
+	header := string(headerBuf) + "\n"
+
+	for {
+		buf := bufPool.Get().([]byte)
+		n, err := io.ReadFull(r, buf)
+		buf = buf[:n]
+
+		if n == 0 {
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Fatal("here", err)
+				break
+			}
+		}
+		completeLine, err := r.ReadBytes('\n')
+
+		if err != io.EOF {
+			buf = append(buf, completeLine...)
+		}
+		writeDataToFile(fmt.Sprintf("input%d.csv", counter), append([]byte(header), buf...), "")
+
+		chunks = append(chunks, ChunkMeta{
+			Id:         counter,
+			Processed:  false,
+			OutputFile: fmt.Sprintf("map%d.json", counter),
+			InputFile:  fmt.Sprintf("input%d.csv", counter),
+		})
+
+		counter += 1
+	}
+
+	meta := CsvMeta{
+		ChunkSize:  chunkSize,
+		ChunksMeta: chunks,
+	}
+
+	metaJson, _ := json.Marshal(meta)
+
+	writeDataToFile("./meta.json", nil, string(metaJson))
+
+	return &meta
+}
+
 func main() {
 	// fileName := "./small-input.csv"
-	fileName := "./input.csv"
+	fileName := "./big-input.csv"
 
 	PrintMemUsage()
 
@@ -242,21 +196,14 @@ func main() {
 	check(err)
 	defer f.Close()
 
-	chunkLineNum := linesInChunk(f)
-	totalLines, _ := linesNum(fileName)
-
-	fmt.Println("Total line count\t", "lines in a chunk")
-	fmt.Println(totalLines, "\t\t", chunkLineNum)
-
-	PrintMemUsage()
-
 	meta := getCsvMeta()
 
 	if meta != nil && isProcessingPending(meta) {
 		fmt.Println("pending processes found, continuing with the unprocessed chunks")
 	} else {
-		meta = createCsvMeta(fileName, totalLines, chunkLineNum)
+		meta = splitCsvAndCreateMeta(f)
 	}
 
-	startProcessing(f, meta)
+	startProcessing(fileName, meta)
+	PrintMemUsage()
 }
