@@ -17,12 +17,16 @@ import (
 
 const (
 	// 10 MB
-	chunkSize  = 10 * (1 << 20)
-	maxBuckets = 100
+	oneMb                      = 1 << 20
+	chunkSize                  = 10 * oneMb
+	maxBuckets                 = 100
+	maxConcurrentMapOperations = 10
 	// chunkSize = 1
 )
 
 var (
+	// using channels to create a pseudo semaphore
+	sem           = make(chan int, maxConcurrentMapOperations)
 	bucketFileMux = make([]sync.Mutex, 100)
 	metaMux       = sync.Mutex{}
 )
@@ -178,11 +182,26 @@ func startProcessing(fileName string, meta *CsvMeta) {
 	for _, chunk := range meta.ChunksMeta {
 		if !chunk.Processed {
 			wg.Add(1)
+			sem <- 1
 			go func(chunk ChunkMeta) {
 				defer wg.Done()
 				mapStageOnSegment(chunk)
+				<-sem
 			}(chunk)
 		}
+	}
+
+	wg.Wait()
+
+	bucketFiles, err := filepath.Glob("bucket*.csv")
+	check(err)
+
+	for _, fileName := range bucketFiles {
+		wg.Add(1)
+		go func(fileName string) {
+			defer wg.Done()
+			reduceStage(fileName)
+		}(fileName)
 	}
 
 	wg.Wait()
@@ -263,6 +282,8 @@ func cleanTempFiles() {
 	check(err)
 
 	files := append(inputFiles, bucketFiles...)
+	fmt.Println("Removing meta.json....")
+	files = append(files, "meta.json")
 
 	for _, f := range files {
 		err := os.Remove(f)
@@ -291,5 +312,6 @@ func main() {
 
 	startProcessing(fileName, meta)
 	PrintMemUsage()
+
 	cleanTempFiles()
 }
