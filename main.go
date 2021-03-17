@@ -243,6 +243,21 @@ func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
 	return &meta
 }
 
+func cleanTempFiles() {
+	fmt.Println("Cleaning up the temporary files now....")
+	bucketFiles, err := filepath.Glob("bucket*.csv")
+	check(err)
+	inputFiles, err := filepath.Glob("input*.csv")
+	check(err)
+
+	files := append(inputFiles, bucketFiles...)
+
+	for _, f := range files {
+		err := os.Remove(f)
+		check(err)
+	}
+}
+
 func main() {
 	// fileName := "./small-input.csv"
 	fileName := "./big-input.csv"
