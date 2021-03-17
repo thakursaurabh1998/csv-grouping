@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/ioutil"
 	"log"
@@ -15,14 +16,19 @@ import (
 
 const (
 	// 10 MB
-	chunkSize = 10 * (1 << 20)
+	chunkSize  = 10 * (1 << 20)
+	maxBuckets = 100
 	// chunkSize = 1
+)
+
+var (
+	bucketFileMux = make([]sync.Mutex, 100)
+	metaMux       = sync.Mutex{}
 )
 
 type ChunkMeta struct {
 	Id         int    `json:"id"`
 	Processed  bool   `json:"processed"`
-	OutputFile string `json:"outputFile"`
 	InputFile  string `json:"inputFile"`
 }
 
@@ -33,6 +39,12 @@ type CsvMeta struct {
 
 func bToMb(byteNum uint64) uint64 {
 	return byteNum / 1024 / 1024
+}
+
+func createHashNumber(s string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return h.Sum64()
 }
 
 func PrintMemUsage() {
@@ -88,7 +100,33 @@ func isProcessingPending(meta *CsvMeta) bool {
 	return false
 }
 
-func processCsvSegment(chunkMeta ChunkMeta) {
+func markChunkComplete(chunkId int) {
+	metaMux.Lock()
+	csvMeta := getCsvMeta()
+	csvMeta.ChunksMeta[chunkId-1].Processed = true
+
+	metaJson, _ := json.Marshal(csvMeta)
+
+	writeDataToFile("./meta.json", nil, string(metaJson))
+
+	metaMux.Unlock()
+}
+
+func appendCsv(csvData *[][]string, bucketId int) {
+	f, err := os.OpenFile(fmt.Sprintf("bucket%d.csv", bucketId), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	check(err)
+	w := csv.NewWriter(f)
+
+	bucketFileMux[bucketId].Lock()
+	w.WriteAll(*csvData)
+	bucketFileMux[bucketId].Unlock()
+
+	if err := w.Error(); err != nil {
+		log.Fatalln("error writing csv:", err)
+	}
+}
+
+func mapStageOnSegment(chunkMeta ChunkMeta) {
 	f, err := os.Open(chunkMeta.InputFile)
 	check(err)
 	defer f.Close()
@@ -96,31 +134,51 @@ func processCsvSegment(chunkMeta ChunkMeta) {
 
 	var header []string
 
+	stringBucket := [maxBuckets][][]string{}
+
 	for {
 		record, err := r.Read()
 		if err == io.EOF {
-            break
-        }
+			break
+		}
 		if err != nil {
-            panic(err)
-        }
+			panic(err)
+		}
 		if len(header) == 0 {
 			header = record
+			continue
 		}
 
-		// data processing here
+		dimensionKey := fmt.Sprintf("%s:%s:%s", record[0], record[1], record[2])
+
+		hashNumber := createHashNumber(dimensionKey)
+
+		bucketIndex := hashNumber % maxBuckets
+
+		stringBucket[bucketIndex] = append(stringBucket[bucketIndex], record)
 	}
+
+	for bucketId, bucketData := range stringBucket {
+		if len(bucketData) > 0 {
+			appendCsv(&bucketData, bucketId)
+		}
+	}
+
+	markChunkComplete(chunkMeta.Id)
+	// parse int
+	// metric1, err := strconv.ParseInt(record[3], 10, 64)
+	// metric2, err := strconv.ParseInt(record[4], 10, 64)
 }
 
 func startProcessing(fileName string, meta *CsvMeta) {
 	var wg sync.WaitGroup
 
 	for _, chunk := range meta.ChunksMeta {
-		if chunk.Processed == false {
+		if !chunk.Processed {
 			wg.Add(1)
 			go func(chunk ChunkMeta) {
 				defer wg.Done()
-				processCsvSegment(chunk)
+				mapStageOnSegment(chunk)
 			}(chunk)
 		}
 	}
@@ -167,7 +225,6 @@ func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
 		chunks = append(chunks, ChunkMeta{
 			Id:         counter,
 			Processed:  false,
-			OutputFile: fmt.Sprintf("map%d.json", counter),
 			InputFile:  fmt.Sprintf("input%d.csv", counter),
 		})
 
