@@ -188,10 +188,8 @@ func startProcessing(fileName string, meta *CsvMeta) {
 	wg.Wait()
 }
 
-func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
-	fmt.Println("Splitting the large input file to smaller chunks....")
-
-	var chunks []ChunkMeta
+func splitCsv(inputFile *os.File, prefix string) int {
+	fmt.Printf("Splitting the %s file to smaller chunks....\n", inputFile.Name())
 
 	r := bufio.NewReader(inputFile)
 
@@ -224,15 +222,24 @@ func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
 		if err != io.EOF {
 			buf = append(buf, completeLine...)
 		}
-		writeDataToFile(fmt.Sprintf("input%d.csv", counter), append([]byte(header), buf...), "")
+		writeDataToFile(fmt.Sprintf("%s%d.csv", prefix, counter), append([]byte(header), buf...), "")
 
+		counter += 1
+	}
+
+	return counter
+}
+
+func createMeta(chunkCount int) *CsvMeta {
+	var chunks []ChunkMeta
+
+	for counter := 1; counter < chunkCount; counter += 1 {
 		chunks = append(chunks, ChunkMeta{
 			Id:        counter,
 			Processed: false,
 			InputFile: fmt.Sprintf("input%d.csv", counter),
 		})
 
-		counter += 1
 	}
 
 	meta := CsvMeta{
@@ -278,7 +285,8 @@ func main() {
 	if meta != nil && isProcessingPending(meta) {
 		fmt.Println("pending processes found, continuing with the unprocessed chunks")
 	} else {
-		meta = splitCsvAndCreateMeta(f)
+		counter := splitCsv(f, "input")
+		meta = createMeta(counter)
 	}
 
 	startProcessing(fileName, meta)
