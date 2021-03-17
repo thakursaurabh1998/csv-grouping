@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 )
@@ -27,9 +28,9 @@ var (
 )
 
 type ChunkMeta struct {
-	Id         int    `json:"id"`
-	Processed  bool   `json:"processed"`
-	InputFile  string `json:"inputFile"`
+	Id        int    `json:"id"`
+	Processed bool   `json:"processed"`
+	InputFile string `json:"inputFile"`
 }
 
 type CsvMeta struct {
@@ -101,6 +102,7 @@ func isProcessingPending(meta *CsvMeta) bool {
 }
 
 func markChunkComplete(chunkId int) {
+	fmt.Printf("Processing complete for chunk %d....\n", chunkId)
 	metaMux.Lock()
 	csvMeta := getCsvMeta()
 	csvMeta.ChunksMeta[chunkId-1].Processed = true
@@ -187,6 +189,8 @@ func startProcessing(fileName string, meta *CsvMeta) {
 }
 
 func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
+	fmt.Println("Splitting the large input file to smaller chunks....")
+
 	var chunks []ChunkMeta
 
 	r := bufio.NewReader(inputFile)
@@ -223,9 +227,9 @@ func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
 		writeDataToFile(fmt.Sprintf("input%d.csv", counter), append([]byte(header), buf...), "")
 
 		chunks = append(chunks, ChunkMeta{
-			Id:         counter,
-			Processed:  false,
-			InputFile:  fmt.Sprintf("input%d.csv", counter),
+			Id:        counter,
+			Processed: false,
+			InputFile: fmt.Sprintf("input%d.csv", counter),
 		})
 
 		counter += 1
@@ -237,7 +241,8 @@ func splitCsvAndCreateMeta(inputFile *os.File) *CsvMeta {
 	}
 
 	metaJson, _ := json.Marshal(meta)
-
+	fmt.Println("Completed creating chunks....")
+	fmt.Println("Now creating meta file....")
 	writeDataToFile("./meta.json", nil, string(metaJson))
 
 	return &meta
@@ -278,4 +283,5 @@ func main() {
 
 	startProcessing(fileName, meta)
 	PrintMemUsage()
+	cleanTempFiles()
 }
