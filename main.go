@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -118,12 +119,23 @@ func markChunkComplete(chunkId int) {
 	metaMux.Unlock()
 }
 
-func appendCsv(csvData *[][]string, bucketId int) {
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
+
+func appendCsv(csvData *[][]string, header *[]string, bucketId int) {
+	fileExisted := fileExists(fmt.Sprintf("bucket%d.csv", bucketId))
+
 	f, err := os.OpenFile(fmt.Sprintf("bucket%d.csv", bucketId), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	check(err)
 	w := csv.NewWriter(f)
 
 	bucketFileMux[bucketId].Lock()
+	if !fileExisted {
+		headerArr := [][]string{*header}
+		w.WriteAll(headerArr)
+	}
 	w.WriteAll(*csvData)
 	bucketFileMux[bucketId].Unlock()
 
@@ -166,7 +178,7 @@ func mapStageOnSegment(chunkMeta ChunkMeta) {
 
 	for bucketId, bucketData := range stringBucket {
 		if len(bucketData) > 0 {
-			appendCsv(&bucketData, bucketId)
+			appendCsv(&bucketData, &header, bucketId)
 		}
 	}
 
