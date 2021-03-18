@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"container/heap"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -12,17 +13,22 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/thakursaurabh1998/csv-grouping/util"
 )
 
 const (
 	// 10 MB
-	oneMb                      = 1 << 20
-	chunkSize                  = 10 * oneMb
+	oneMb = 1 << 20
+	// chunkSize                  = 10 * oneMb
 	maxBuckets                 = 100
 	maxConcurrentMapOperations = 10
-	// chunkSize = 1
+	maxElemsCollectorFlush     = 20
+	chunkSize                  = 1024
 )
 
 var (
@@ -32,12 +38,14 @@ var (
 	metaMux       = sync.Mutex{}
 )
 
+// ChunkMeta contains the meta of a particular chunk
 type ChunkMeta struct {
-	Id        int    `json:"id"`
+	ID        int    `json:"id"`
 	Processed bool   `json:"processed"`
 	InputFile string `json:"inputFile"`
 }
 
+// CsvMeta contains the meta for the csv
 type CsvMeta struct {
 	ChunksMeta []ChunkMeta `json:"chunksMeta"`
 	ChunkSize  uint64      `json:"chunkSize"`
@@ -53,7 +61,7 @@ func createHashNumber(s string) uint64 {
 	return h.Sum64()
 }
 
-func PrintMemUsage() {
+func printMemUsage() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
@@ -106,15 +114,15 @@ func isProcessingPending(meta *CsvMeta) bool {
 	return false
 }
 
-func markChunkComplete(chunkId int) {
-	fmt.Printf("Processing complete for chunk %d....\n", chunkId)
+func markChunkComplete(chunkID int) {
+	fmt.Printf("Processing complete for chunk %d....\n", chunkID)
 	metaMux.Lock()
 	csvMeta := getCsvMeta()
-	csvMeta.ChunksMeta[chunkId-1].Processed = true
+	csvMeta.ChunksMeta[chunkID-1].Processed = true
 
-	metaJson, _ := json.Marshal(csvMeta)
+	metaJSON, _ := json.Marshal(csvMeta)
 
-	writeDataToFile("./meta.json", nil, string(metaJson))
+	writeDataToFile("./meta.json", nil, string(metaJSON))
 
 	metaMux.Unlock()
 }
@@ -124,20 +132,21 @@ func fileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-func appendCsv(csvData *[][]string, header *[]string, bucketId int) {
-	fileExisted := fileExists(fmt.Sprintf("bucket%d.csv", bucketId))
+func appendCsv(csvData *[][]string, header *[]string, bucketID int) {
+	fileExisted := fileExists(fmt.Sprintf("bucket%d.csv", bucketID))
 
-	f, err := os.OpenFile(fmt.Sprintf("bucket%d.csv", bucketId), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(fmt.Sprintf("bucket%d.csv", bucketID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	check(err)
 	w := csv.NewWriter(f)
 
-	bucketFileMux[bucketId].Lock()
+	bucketFileMux[bucketID].Lock()
 	if !fileExisted {
+		// add header to bucket file if it was created now
 		headerArr := [][]string{*header}
 		w.WriteAll(headerArr)
 	}
 	w.WriteAll(*csvData)
-	bucketFileMux[bucketId].Unlock()
+	bucketFileMux[bucketID].Unlock()
 
 	if err := w.Error(); err != nil {
 		log.Fatalln("error writing csv:", err)
@@ -176,16 +185,149 @@ func mapStageOnSegment(chunkMeta ChunkMeta) {
 		stringBucket[bucketIndex] = append(stringBucket[bucketIndex], record)
 	}
 
-	for bucketId, bucketData := range stringBucket {
+	for bucketID, bucketData := range stringBucket {
 		if len(bucketData) > 0 {
-			appendCsv(&bucketData, &header, bucketId)
+			appendCsv(&bucketData, &header, bucketID)
 		}
 	}
 
-	markChunkComplete(chunkMeta.Id)
+	markChunkComplete(chunkMeta.ID)
 	// parse int
 	// metric1, err := strconv.ParseInt(record[3], 10, 64)
 	// metric2, err := strconv.ParseInt(record[4], 10, 64)
+}
+
+type (
+	//ByDimensions is made for sorting csv
+	ByDimensions [][]string
+)
+
+func (a ByDimensions) Len() int {
+	return len(a)
+}
+
+func (a ByDimensions) Less(i, j int) bool {
+	iString := strings.Join(a[i][:3], "")
+	jString := strings.Join(a[j][:3], "")
+	return iString < jString
+}
+
+func (a ByDimensions) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+
+func sortFile(fileName string) {
+	f, err := os.OpenFile(fileName, os.O_RDWR, 0644)
+	check(err)
+	defer f.Close()
+
+	r := csv.NewReader(f)
+
+	header, err := r.Read()
+	records, err := r.ReadAll()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sort.Sort(ByDimensions(records))
+
+	// empty the file and take the cursor to the start
+	f.Truncate(0)
+	f.Seek(0, 0)
+
+	w := csv.NewWriter(f)
+	err = w.Write(header)
+	err = w.WriteAll(records)
+	check(err)
+}
+
+func combineSortedFiles(fileNames []string, bucketID int) {
+	fmt.Printf("Combining files: %s ....\n", strings.Join(fileNames, ", "))
+
+	var readers []*csv.Reader
+
+	linesMinHeap := &util.StringHeap{}
+
+	heap.Init(linesMinHeap)
+
+	var header []string
+
+	for index, fileName := range fileNames {
+		f, err := os.Open(fileName)
+		check(err)
+		defer f.Close()
+		readers = append(readers, csv.NewReader(f))
+		h, _ := readers[index].Read()
+		if header == nil {
+			header = h
+		}
+		line, _ := readers[index].Read()
+		heap.Push(linesMinHeap, util.HeapValue{StringValue: strings.Join(line[:3], ":"), Index: index, Value: line})
+	}
+
+	collector := [][]string{}
+
+	for linesMinHeap.Len() > 0 {
+		topLine := linesMinHeap.Pop().(util.HeapValue)
+		collector = append(collector, topLine.Value)
+
+		newLine, err := readers[topLine.Index].Read()
+		if err != nil {
+			if err == io.EOF {
+				continue
+			} else {
+				check(err)
+			}
+		}
+
+		heap.Push(linesMinHeap, util.HeapValue{StringValue: strings.Join(newLine[:3], ":"), Index: topLine.Index, Value: newLine})
+
+		if len(collector) >= maxElemsCollectorFlush {
+			appendCsv(&collector, &header, bucketID)
+			collector = nil
+		}
+	}
+	if len(collector) > 0 {
+		appendCsv(&collector, &header, bucketID)
+	}
+}
+
+func externalSort(fileName string) {
+	var wg sync.WaitGroup
+
+	f, err := os.Open(fileName)
+	check(err)
+	defer f.Close()
+
+	bucketNum := strings.Split(fileName, ".csv")[0]
+	splitCsv(f, fmt.Sprintf("%s:input", bucketNum))
+
+	// remove original bucket file
+	fmt.Printf("Removing original bucket file %s....\n", fileName)
+	err = os.Remove(fileName)
+	check(err)
+
+	bucketInputFiles, err := filepath.Glob(fmt.Sprintf("%s:input*.csv", bucketNum))
+	check(err)
+
+	for _, fn := range bucketInputFiles {
+		wg.Add(1)
+		go func(fn string) {
+			defer wg.Done()
+			sortFile(fn)
+		}(fn)
+	}
+	wg.Wait()
+
+	bucketID16, err := strconv.ParseInt(strings.Split(bucketNum, "bucket")[1], 10, 16)
+	bucketID := int(bucketID16)
+	check(err)
+
+	combineSortedFiles(bucketInputFiles, bucketID)
+}
+
+func reduceStage(fileName string) {
+	externalSort(fileName)
 }
 
 func startProcessing(fileName string, meta *CsvMeta) {
@@ -255,7 +397,7 @@ func splitCsv(inputFile *os.File, prefix string) int {
 		}
 		writeDataToFile(fmt.Sprintf("%s%d.csv", prefix, counter), append([]byte(header), buf...), "")
 
-		counter += 1
+		counter++
 	}
 
 	return counter
@@ -264,9 +406,9 @@ func splitCsv(inputFile *os.File, prefix string) int {
 func createMeta(chunkCount int) *CsvMeta {
 	var chunks []ChunkMeta
 
-	for counter := 1; counter < chunkCount; counter += 1 {
+	for counter := 1; counter < chunkCount; counter++ {
 		chunks = append(chunks, ChunkMeta{
-			Id:        counter,
+			ID:        counter,
 			Processed: false,
 			InputFile: fmt.Sprintf("input%d.csv", counter),
 		})
@@ -278,10 +420,10 @@ func createMeta(chunkCount int) *CsvMeta {
 		ChunksMeta: chunks,
 	}
 
-	metaJson, _ := json.Marshal(meta)
+	metaJSON, _ := json.Marshal(meta)
 	fmt.Println("Completed creating chunks....")
 	fmt.Println("Now creating meta file....")
-	writeDataToFile("./meta.json", nil, string(metaJson))
+	writeDataToFile("./meta.json", nil, string(metaJSON))
 
 	return &meta
 }
@@ -305,9 +447,10 @@ func cleanTempFiles() {
 
 func main() {
 	// fileName := "./small-input.csv"
-	fileName := "./big-input.csv"
+	// fileName := "./big-input.csv"
+	fileName := "./mid-input.csv"
 
-	PrintMemUsage()
+	printMemUsage()
 
 	f, err := os.Open(fileName)
 	check(err)
@@ -323,7 +466,25 @@ func main() {
 	}
 
 	startProcessing(fileName, meta)
-	PrintMemUsage()
+	printMemUsage()
 
-	cleanTempFiles()
+	// cleanTempFiles()
 }
+
+// func main() {
+// 	f, err := os.Open("./small-input.csv")
+// 	check(err)
+
+// 	r := csv.NewReader(f)
+
+// 	for {
+// 		lines, err := r.Read()
+
+// 		fmt.Println(lines, err)
+
+// 		if err != nil {
+// 			break
+// 		}
+// 	}
+
+// }
