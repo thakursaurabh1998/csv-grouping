@@ -21,13 +21,11 @@ import (
 )
 
 const (
-	// 10 MB
-	oneMb = 1 << 20
-	// chunkSize                  = 10 * oneMb
+	oneMb                      = 1 << 20
+	chunkSize                  = 10 * oneMb
 	maxBuckets                 = 100
 	maxConcurrentMapOperations = 10
-	maxElemsCollectorFlush     = 20
-	chunkSize                  = 1024
+	maxElemsCollectorFlush     = 250000
 )
 
 var (
@@ -35,6 +33,7 @@ var (
 	sem           = make(chan int, maxConcurrentMapOperations)
 	bucketFileMux = make([]sync.Mutex, 100)
 	metaMux       = sync.Mutex{}
+	outputMux     = sync.Mutex{}
 )
 
 // ChunkMeta contains the meta of a particular chunk
@@ -348,22 +347,69 @@ func externalSort(fileName string) {
 	combineSortedFiles(bucketInputFiles, bucketID)
 }
 
-func createOutputFile() {
+func writeToOutputFile(records *map[string][]int64, header *[]string) {
+	fileName := "output.csv"
+	outputMux.Lock()
+	fileExisted := fileExists(fileName)
 
+	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	check(err)
+	w := csv.NewWriter(f)
+
+	if !fileExisted {
+		// add header to bucket file if it was created now
+		headerArr := [][]string{*header}
+		w.WriteAll(headerArr)
+	}
+
+	csvData := [][]string{}
+
+	for k, v := range *records {
+		row := strings.Split(k, ":")
+		row = append(row, []string{strconv.FormatInt(v[0], 10), strconv.FormatInt(v[1], 10)}...)
+		csvData = append(csvData, row)
+	}
+	w.WriteAll(csvData)
+	outputMux.Unlock()
 }
 
 func reduceStage(fileName string) {
-	// bucketFiles, err := filepath.Glob("bucket*.csv")
-	// check(err)
-	// var wg sync.WaitGroup
+	f, err := os.Open(fileName)
+	check(err)
+	r := csv.NewReader(f)
 
-	// for _, fileName := range bucketFiles {
-	// 	wg.Add(1)
-	// 	go func(fileName string) {
-	// 		defer wg.Done()
-	// 		reduceStage(fileName)
-	// 	}(fileName)
-	// }
+	header, err := r.Read()
+	check(err)
+
+	coll := map[string][]int64{}
+
+	for {
+		record, err := r.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			} else {
+				check(err)
+			}
+		}
+		metric1, err := strconv.ParseInt(record[3], 10, 64)
+		metric2, err := strconv.ParseInt(record[4], 10, 64)
+
+		key := strings.Join(record[:3], ":")
+		if coll[key] == nil {
+			coll[key] = []int64{0, 0}
+		}
+		coll[key][0] += metric1
+		coll[key][1] += metric2
+		if len(coll) >= maxElemsCollectorFlush {
+			writeToOutputFile(&coll, &header)
+			coll = make(map[string][]int64)
+		}
+	}
+
+	if len(coll) > 0 {
+		writeToOutputFile(&coll, &header)
+	}
 }
 
 func startProcessing(fileName string, meta *CsvMeta) {
@@ -392,6 +438,7 @@ func startProcessing(fileName string, meta *CsvMeta) {
 			defer wg.Done()
 			externalSort(fileName)
 			reduceStage(fileName)
+			os.Remove(fileName)
 		}(fileName)
 	}
 
@@ -484,8 +531,8 @@ func cleanTempFiles() {
 
 func main() {
 	// fileName := "./small-input.csv"
-	// fileName := "./big-input.csv"
-	fileName := "./mid-input.csv"
+	fileName := "./big-input.csv"
+	// fileName := "./mid-input.csv"
 
 	printMemUsage()
 
@@ -505,5 +552,5 @@ func main() {
 	startProcessing(fileName, meta)
 	printMemUsage()
 
-	// cleanTempFiles()
+	cleanTempFiles()
 }
