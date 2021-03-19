@@ -1,6 +1,6 @@
-package util
+package minheap
 
-// An StringHeap is a min-heap of ints.
+import "fmt"
 
 type HeapValue struct {
 	HashNumber uint64
@@ -8,28 +8,76 @@ type HeapValue struct {
 	Value      []string
 }
 
-type IntHeap []HeapValue
-
-func (h IntHeap) Len() int {
-	return len(h)
-}
-func (h IntHeap) Less(i, j int) bool {
-	return h[i].HashNumber < h[j].HashNumber
-}
-func (h IntHeap) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
+type MinHeap struct {
+	heap     []HeapValue
+	capacity int
+	size     int
 }
 
-func (h *IntHeap) Push(x interface{}) {
-	// Push and Pop use pointer receivers because they modify the slice's length,
-	// not just its contents.
-	*h = append(*h, x.(HeapValue))
+func Init(maxCap int) *MinHeap {
+	return &MinHeap{
+		capacity: maxCap,
+		heap:     make([]HeapValue, maxCap),
+	}
 }
 
-func (h *IntHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
+func (mh *MinHeap) Insert(key HeapValue) error {
+	if mh.size == mh.capacity {
+		return fmt.Errorf("MaxCapacity")
+	}
+	mh.heap[mh.size] = key
+	mh.size++
+	mh.bubbleUp()
+	return nil
+}
+
+func (mh *MinHeap) Len() int {
+	return mh.size
+}
+
+func (mh *MinHeap) Pop() (*HeapValue, error) {
+	if mh.size == 0 {
+		return nil, fmt.Errorf("HeapEmpty")
+	}
+	minVal := mh.heap[0]
+	mh.heap[0] = mh.heap[mh.size-1]
+	mh.size--
+	mh.sink()
+	return &minVal, nil
+}
+
+// Bubble up a key in a heap when the parent is greater
+// than the new inserted key, used when inserting a new keys
+func (mh *MinHeap) bubbleUp() {
+	keyIndex := mh.size - 1
+	parentIndex := (keyIndex - 1) / 2
+	for keyIndex > 0 && mh.heap[parentIndex].HashNumber > mh.heap[keyIndex].HashNumber {
+		mh.heap[parentIndex], mh.heap[keyIndex] = mh.heap[keyIndex], mh.heap[parentIndex]
+		keyIndex = parentIndex
+		parentIndex = (keyIndex - 1) / 2
+	}
+}
+
+// Sink a key in a heap when the child is smaller
+// than the root key, used when removing a key from the heap
+func (mh *MinHeap) sink() {
+	keyIndex := 0
+	leftChildIndex := keyIndex*2 + 1
+	rightChildIndex := keyIndex*2 + 2
+
+	for leftChildIndex < mh.size {
+		smallerChildIndex := leftChildIndex
+		if rightChildIndex < mh.size && mh.heap[rightChildIndex].HashNumber < mh.heap[leftChildIndex].HashNumber {
+			smallerChildIndex = rightChildIndex
+		}
+
+		if mh.heap[keyIndex].HashNumber > mh.heap[smallerChildIndex].HashNumber {
+			mh.heap[keyIndex], mh.heap[smallerChildIndex] = mh.heap[smallerChildIndex], mh.heap[keyIndex]
+			keyIndex = smallerChildIndex
+		} else {
+			break
+		}
+		leftChildIndex = keyIndex*2 + 1
+		rightChildIndex = keyIndex*2 + 2
+	}
 }

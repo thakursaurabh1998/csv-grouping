@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"container/heap"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -18,7 +17,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/thakursaurabh1998/csv-grouping/util"
+	minheap "github.com/thakursaurabh1998/csv-grouping/util"
 )
 
 const (
@@ -214,7 +213,7 @@ func (a ByDimensions) Len() int {
 func (a ByDimensions) Less(i, j int) bool {
 	iString := strings.Join(a[i][:3], "")
 	jString := strings.Join(a[j][:3], "")
-	return createHashNumber(iString) <= createHashNumber(jString)
+	return createHashNumber(iString) > createHashNumber(jString)
 }
 
 func (a ByDimensions) Swap(i, j int) {
@@ -251,9 +250,7 @@ func combineSortedFiles(fileNames []string, bucketID int) {
 
 	var readers []*csv.Reader
 
-	linesMinHeap := &util.IntHeap{}
-
-	heap.Init(linesMinHeap)
+	mh := minheap.Init(len(fileNames))
 
 	var header []string
 
@@ -268,14 +265,13 @@ func combineSortedFiles(fileNames []string, bucketID int) {
 		}
 		line, _ := readers[index].Read()
 		hashKey := createHashNumber(strings.Join(line[:3], ":"))
-		fmt.Printf("PUSHED: %d %d\n", bucketID, hashKey)
-		heap.Push(linesMinHeap, util.HeapValue{HashNumber: hashKey, Index: index, Value: line})
+		mh.Insert(minheap.HeapValue{HashNumber: hashKey, Index: index, Value: line})
 	}
 
 	collector := [][]string{}
 
-	for linesMinHeap.Len() > 0 {
-		topLine := linesMinHeap.Pop().(util.HeapValue)
+	for mh.Len() > 0 {
+		topLine, _ := mh.Pop()
 		collector = append(collector, topLine.Value)
 
 		for {
@@ -297,8 +293,7 @@ func combineSortedFiles(fileNames []string, bucketID int) {
 					collector = nil
 				}
 			} else {
-				fmt.Printf("PUSHED: %d %d\n", bucketID, hashKey)
-				heap.Push(linesMinHeap, util.HeapValue{HashNumber: hashKey, Index: topLine.Index, Value: nextLine})
+				mh.Insert(minheap.HeapValue{HashNumber: hashKey, Index: topLine.Index, Value: nextLine})
 				break
 			}
 		}
@@ -487,47 +482,28 @@ func cleanTempFiles() {
 	}
 }
 
-// func main() {
-// 	// fileName := "./small-input.csv"
-// 	// fileName := "./big-input.csv"
-// 	fileName := "./mid-input.csv"
+func main() {
+	// fileName := "./small-input.csv"
+	// fileName := "./big-input.csv"
+	fileName := "./mid-input.csv"
 
-// 	printMemUsage()
+	printMemUsage()
 
-// 	f, err := os.Open(fileName)
-// 	check(err)
-// 	defer f.Close()
+	f, err := os.Open(fileName)
+	check(err)
+	defer f.Close()
 
-// 	meta := getCsvMeta()
+	meta := getCsvMeta()
 
-// 	if meta != nil && isProcessingPending(meta) {
-// 		fmt.Println("pending processes found, continuing with the unprocessed chunks")
-// 	} else {
-// 		counter := splitCsv(f, "input")
-// 		meta = createMeta(counter)
-// 	}
+	if meta != nil && isProcessingPending(meta) {
+		fmt.Println("pending processes found, continuing with the unprocessed chunks")
+	} else {
+		counter := splitCsv(f, "input")
+		meta = createMeta(counter)
+	}
 
-// 	startProcessing(fileName, meta)
-// 	printMemUsage()
+	startProcessing(fileName, meta)
+	printMemUsage()
 
-// 	// cleanTempFiles()
-// }
-
-// func main() {
-
-// 	linesMinHeap := &util.IntHeap{}
-
-// 	heap.Init(linesMinHeap)
-
-
-// 	for _, num := range arr {
-// 		heap.Push(linesMinHeap, util.HeapValue{HashNumber: num})
-// 		for linesMinHeap.Len() == 4 {
-// 			fmt.Println(heap.Pop(linesMinHeap).(util.IntHeap))
-// 		}
-// 	}
-
-// 	for linesMinHeap.Len() > 0 {
-// 		fmt.Println(linesMinHeap.Pop())
-// 	}
-// }
+	// cleanTempFiles()
+}
