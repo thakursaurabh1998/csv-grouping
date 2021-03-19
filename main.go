@@ -122,6 +122,10 @@ func markChunkComplete(chunkID int) {
 
 	metaJSON, _ := json.Marshal(csvMeta)
 
+	fmt.Printf("Removing input chunk: input%d.csv....\n", chunkID)
+	err := os.Remove(fmt.Sprintf("input%d.csv", chunkID))
+	check(err)
+
 	writeDataToFile("./meta.json", nil, string(metaJSON))
 
 	metaMux.Unlock()
@@ -133,13 +137,14 @@ func fileExists(path string) bool {
 }
 
 func appendCsv(csvData *[][]string, header *[]string, bucketID int) {
+	bucketFileMux[bucketID].Lock()
+
 	fileExisted := fileExists(fmt.Sprintf("bucket%d.csv", bucketID))
 
 	f, err := os.OpenFile(fmt.Sprintf("bucket%d.csv", bucketID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	check(err)
 	w := csv.NewWriter(f)
 
-	bucketFileMux[bucketID].Lock()
 	if !fileExisted {
 		// add header to bucket file if it was created now
 		headerArr := [][]string{*header}
@@ -209,7 +214,7 @@ func (a ByDimensions) Len() int {
 func (a ByDimensions) Less(i, j int) bool {
 	iString := strings.Join(a[i][:3], "")
 	jString := strings.Join(a[j][:3], "")
-	return iString < jString
+	return createHashNumber(iString) <= createHashNumber(jString)
 }
 
 func (a ByDimensions) Swap(i, j int) {
@@ -246,7 +251,7 @@ func combineSortedFiles(fileNames []string, bucketID int) {
 
 	var readers []*csv.Reader
 
-	linesMinHeap := &util.StringHeap{}
+	linesMinHeap := &util.IntHeap{}
 
 	heap.Init(linesMinHeap)
 
@@ -262,7 +267,9 @@ func combineSortedFiles(fileNames []string, bucketID int) {
 			header = h
 		}
 		line, _ := readers[index].Read()
-		heap.Push(linesMinHeap, util.HeapValue{StringValue: strings.Join(line[:3], ":"), Index: index, Value: line})
+		hashKey := createHashNumber(strings.Join(line[:3], ":"))
+		fmt.Printf("PUSHED: %d %d\n", bucketID, hashKey)
+		heap.Push(linesMinHeap, util.HeapValue{HashNumber: hashKey, Index: index, Value: line})
 	}
 
 	collector := [][]string{}
@@ -271,24 +278,44 @@ func combineSortedFiles(fileNames []string, bucketID int) {
 		topLine := linesMinHeap.Pop().(util.HeapValue)
 		collector = append(collector, topLine.Value)
 
-		newLine, err := readers[topLine.Index].Read()
-		if err != nil {
-			if err == io.EOF {
-				continue
+		for {
+			nextLine, err := readers[topLine.Index].Read()
+			if err != nil {
+				if err == io.EOF {
+					break
+				} else {
+					log.Fatal(err)
+					continue
+				}
+			}
+			hashKey := createHashNumber(strings.Join(nextLine[:3], ":"))
+			if topLine.HashNumber == hashKey {
+				collector = append(collector, topLine.Value)
+
+				if len(collector) >= maxElemsCollectorFlush {
+					appendCsv(&collector, &header, bucketID)
+					collector = nil
+				}
 			} else {
-				check(err)
+				fmt.Printf("PUSHED: %d %d\n", bucketID, hashKey)
+				heap.Push(linesMinHeap, util.HeapValue{HashNumber: hashKey, Index: topLine.Index, Value: nextLine})
+				break
 			}
 		}
-
-		heap.Push(linesMinHeap, util.HeapValue{StringValue: strings.Join(newLine[:3], ":"), Index: topLine.Index, Value: newLine})
-
-		if len(collector) >= maxElemsCollectorFlush {
-			appendCsv(&collector, &header, bucketID)
-			collector = nil
-		}
 	}
+
 	if len(collector) > 0 {
 		appendCsv(&collector, &header, bucketID)
+	}
+
+	// remove bucket segments
+	bucketSegmentNames, err := filepath.Glob(fmt.Sprintf("bucket%d:input*.csv", bucketID))
+	check(err)
+
+	for _, bucketSegmentName := range bucketSegmentNames {
+		fmt.Printf("Removing bucket segment: %s....\n", bucketSegmentName)
+		err = os.Remove(bucketSegmentName)
+		check(err)
 	}
 }
 
@@ -326,8 +353,22 @@ func externalSort(fileName string) {
 	combineSortedFiles(bucketInputFiles, bucketID)
 }
 
+func createOutputFile() {
+
+}
+
 func reduceStage(fileName string) {
-	externalSort(fileName)
+	// bucketFiles, err := filepath.Glob("bucket*.csv")
+	// check(err)
+	// var wg sync.WaitGroup
+
+	// for _, fileName := range bucketFiles {
+	// 	wg.Add(1)
+	// 	go func(fileName string) {
+	// 		defer wg.Done()
+	// 		reduceStage(fileName)
+	// 	}(fileName)
+	// }
 }
 
 func startProcessing(fileName string, meta *CsvMeta) {
@@ -354,6 +395,7 @@ func startProcessing(fileName string, meta *CsvMeta) {
 		wg.Add(1)
 		go func(fileName string) {
 			defer wg.Done()
+			externalSort(fileName)
 			reduceStage(fileName)
 		}(fileName)
 	}
@@ -445,46 +487,47 @@ func cleanTempFiles() {
 	}
 }
 
-func main() {
-	// fileName := "./small-input.csv"
-	// fileName := "./big-input.csv"
-	fileName := "./mid-input.csv"
+// func main() {
+// 	// fileName := "./small-input.csv"
+// 	// fileName := "./big-input.csv"
+// 	fileName := "./mid-input.csv"
 
-	printMemUsage()
+// 	printMemUsage()
 
-	f, err := os.Open(fileName)
-	check(err)
-	defer f.Close()
+// 	f, err := os.Open(fileName)
+// 	check(err)
+// 	defer f.Close()
 
-	meta := getCsvMeta()
+// 	meta := getCsvMeta()
 
-	if meta != nil && isProcessingPending(meta) {
-		fmt.Println("pending processes found, continuing with the unprocessed chunks")
-	} else {
-		counter := splitCsv(f, "input")
-		meta = createMeta(counter)
-	}
+// 	if meta != nil && isProcessingPending(meta) {
+// 		fmt.Println("pending processes found, continuing with the unprocessed chunks")
+// 	} else {
+// 		counter := splitCsv(f, "input")
+// 		meta = createMeta(counter)
+// 	}
 
-	startProcessing(fileName, meta)
-	printMemUsage()
+// 	startProcessing(fileName, meta)
+// 	printMemUsage()
 
-	// cleanTempFiles()
-}
+// 	// cleanTempFiles()
+// }
 
 // func main() {
-// 	f, err := os.Open("./small-input.csv")
-// 	check(err)
 
-// 	r := csv.NewReader(f)
+// 	linesMinHeap := &util.IntHeap{}
 
-// 	for {
-// 		lines, err := r.Read()
+// 	heap.Init(linesMinHeap)
 
-// 		fmt.Println(lines, err)
 
-// 		if err != nil {
-// 			break
+// 	for _, num := range arr {
+// 		heap.Push(linesMinHeap, util.HeapValue{HashNumber: num})
+// 		for linesMinHeap.Len() == 4 {
+// 			fmt.Println(heap.Pop(linesMinHeap).(util.IntHeap))
 // 		}
 // 	}
 
+// 	for linesMinHeap.Len() > 0 {
+// 		fmt.Println(linesMinHeap.Pop())
+// 	}
 // }
