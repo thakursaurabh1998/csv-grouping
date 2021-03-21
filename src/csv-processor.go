@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,10 +33,6 @@ type (
 	//byDimensions is made for sorting csv
 	byDimensions [][]string
 )
-
-func bToMb(byteNum uint64) uint64 {
-	return byteNum / 1024 / 1024
-}
 
 func createHashNumber(s string) uint64 {
 	h := fnv.New64a()
@@ -132,12 +127,15 @@ func sortFile(fileName string) {
 	fmt.Printf("Sorting finished for %s....\n", fileName)
 }
 
+// combineSortedFiles merges all the sorted smaller chunks using k sorted arrays merging
 func combineSortedFiles(fileNames []string) {
 	fmt.Printf("Combining files: %s ....\n", strings.Join(fileNames, ", "))
 
 	outputFile := "input-sorted.csv"
+	// reader of all the open files
 	var readers []*csv.Reader
 
+	// using minheap for merging sorted files
 	mh := &util.MinHeap{}
 	heap.Init(mh)
 
@@ -234,6 +232,7 @@ func splitCsv(inputFile *os.File, prefix string) {
 
 	r := bufio.NewReader(inputFile)
 
+	// using a memory pool instead of allocating memory everytime
 	bufPool := sync.Pool{New: func() interface{} {
 		buf := make([]byte, chunkSize)
 		return buf
@@ -242,6 +241,8 @@ func splitCsv(inputFile *os.File, prefix string) {
 	counter := 1
 
 	headerBuf, _, _ := r.ReadLine()
+	// putting a chunk of file in the memory
+	// and reading till the next complete line
 	header := string(headerBuf) + "\n"
 
 	for {
@@ -269,6 +270,7 @@ func splitCsv(inputFile *os.File, prefix string) {
 	}
 }
 
+// ReduceStage reduces the data and aggregates it
 func ReduceStage(fileName string) {
 	fmt.Println("Aggregating the dimensions....")
 	f, err := os.Open(fileName)
@@ -298,6 +300,8 @@ func ReduceStage(fileName string) {
 		}
 		coll[key][0] += metric1
 		coll[key][1] += metric2
+
+		// flushing coll to the output file and reinitializing
 		if len(coll) >= maxElemsCollectorFlush {
 			writeToOutputFile(&coll, &header)
 			coll = make(map[string][]int64)
@@ -311,15 +315,7 @@ func ReduceStage(fileName string) {
 	os.Remove("input-sorted.csv")
 }
 
-func PrintMemUsage() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
-	fmt.Printf("\tTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
-	fmt.Printf("\tSys = %v MiB", bToMb(m.Sys))
-	fmt.Printf("\tNumGC = %v\n", m.NumGC)
-}
-
+// ExternalSort sorts the provided file
 func ExternalSort(fileName string) {
 	var wg sync.WaitGroup
 
@@ -328,14 +324,18 @@ func ExternalSort(fileName string) {
 	defer f.Close()
 
 	filePrefix := strings.Split(fileName, ".csv")[0]
+	// splitting the csv into multiple chunks
 	splitCsv(f, fmt.Sprintf("%s:chunk", filePrefix))
 
 	chunkFiles, err := filepath.Glob(fmt.Sprintf("%s:chunk*.csv", filePrefix))
 	check(err)
 
+	// processing those chunked files
 	for _, fn := range chunkFiles {
 		wg.Add(1)
+		// semaphore size defines how many concurrent operations happen
 		sem <- 1
+		// spawning goroutine for sorting separate chunks
 		go func(fn string) {
 			defer wg.Done()
 			sortFile(fn)

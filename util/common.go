@@ -1,5 +1,10 @@
 package util
 
+import (
+	"fmt"
+	"runtime"
+)
+
 type HeapValue struct {
 	HashNumber uint64
 	Index      int
@@ -24,4 +29,18 @@ func (h *MinHeap) Pop() interface{} {
 	x := old[n-1]
 	*h = old[0 : n-1]
 	return x
+}
+
+func bToMb(byteNum uint64) uint64 {
+	return byteNum / 1024 / 1024
+}
+
+// PrintMemUsage prints the memory allocations
+func PrintMemUsage() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
+	fmt.Printf("\tTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
+	fmt.Printf("\tSys = %v MiB", bToMb(m.Sys))
+	fmt.Printf("\tNumGC = %v\n", m.NumGC)
 }

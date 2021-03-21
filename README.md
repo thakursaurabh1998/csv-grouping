@@ -58,5 +58,4 @@ Steps followed to sort the file are:
 2. Sort the smaller chunks by loading them in the memory and using any sorting algorithm, I used the in built sorting function provided by Go.
 3. This sorting step for multiple chunks can be performed parallely as the chunks are independent of each other. I have used `goroutines` to run 10 sorting calls in parallel. The number 10 is decided so that indefinite chunks are not loaded into the memory together causing starvation for CPU among the threads. Also doing this would take up a lot of memory (chunkSize * number of goroutines spawned). This number can be increased according to the number of CPUs available.
 4. After the sort is complete on the chunks, we perform a K sorted array merging on all the chunks to create a single sorted input file.
-5. Now grouping becomes easier, we can read the file line by line without consuming a lot of memory and aggregate the metrics.
-
+5. Now grouping becomes easier, we can read the file line by line without consuming a lot of memory and aggregate the metrics and writing it to the output file.
