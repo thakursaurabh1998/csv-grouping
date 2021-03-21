@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/thakursaurabh1998/csv-grouping/src"
+	"github.com/thakursaurabh1998/csv-grouping/util"
 )
 
 func main() {
@@ -16,7 +17,7 @@ func main() {
 	}
 
 	src.ExternalSort(fileName)
-	src.PrintMemUsage()
+	util.PrintMemUsage()
 
 	src.ReduceStage("input-sorted.csv")
 }
