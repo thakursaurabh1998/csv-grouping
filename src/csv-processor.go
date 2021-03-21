@@ -27,7 +27,7 @@ var (
 	outputMux              = sync.Mutex{}
 	oneMb                  = 1 << 20
 	maxElemsCollectorFlush = 250000
-	chunkSize              = 10 * oneMb
+	chunkSize              = 5 * oneMb
 )
 
 type (

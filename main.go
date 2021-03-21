@@ -8,9 +8,7 @@ import (
 )
 
 func main() {
-	// fileName := "./small-input.csv"
-	// fileName := "./mid-input.csv"
-	fileName := "./big-input.csv"
+	fileName := os.Args[1]
 
 	err := os.Remove("output.csv")
 	if err != nil {
